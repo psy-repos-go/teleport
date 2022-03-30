@@ -19,6 +19,7 @@ package postgres
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 
 	"github.com/gravitational/teleport/lib/auth"
@@ -52,6 +53,7 @@ type Proxy struct {
 // HandleConnection accepts connection from a Postgres client, authenticates
 // it and proxies it to an appropriate database service.
 func (p *Proxy) HandleConnection(ctx context.Context, clientConn net.Conn) (err error) {
+	fmt.Printf("--> Received connection: %T\n", clientConn)
 	startupMessage, tlsConn, backend, err := p.handleStartup(ctx, clientConn)
 	if err != nil {
 		return trace.Wrap(err)

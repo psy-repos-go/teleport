@@ -154,6 +154,10 @@ func onProxyCommandDB(cf *CLIConf) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
+	profile, err := libclient.StatusCurrent(cf.HomePath, cf.Proxy)
+	if err != nil {
+		return trace.Wrap(err)
+	}
 
 	addr := "localhost:0"
 	if cf.LocalProxyPort != "" {
@@ -168,13 +172,25 @@ func onProxyCommandDB(cf *CLIConf) error {
 			log.WithError(err).Warnf("Failed to close listener.")
 		}
 	}()
+
+	// If user requested no client auth, open an authenticated tunnel using
+	// client cert/key of the database.
+	certFile := cf.LocalProxyCertFile
+	if certFile == "" && cf.LocalProxyNoClientAuth {
+		certFile = profile.DatabaseCertPathForCluster(cf.SiteName, database.ServiceName)
+	}
+	keyFile := cf.LocalProxyKeyFile
+	if keyFile == "" && cf.LocalProxyNoClientAuth {
+		keyFile = profile.KeyPath()
+	}
+
 	lp, err := mkLocalProxy(cf.Context, localProxyOpts{
 		proxyAddr: client.WebProxyAddr,
 		protocol:  database.Protocol,
 		listener:  listener,
 		insecure:  cf.InsecureSkipVerify,
-		certFile:  cf.LocalProxyCertFile,
-		keyFile:   cf.LocalProxyKeyFile,
+		certFile:  certFile,
+		keyFile:   keyFile,
 	})
 	if err != nil {
 		return trace.Wrap(err)
@@ -184,18 +200,23 @@ func onProxyCommandDB(cf *CLIConf) error {
 		lp.Close()
 	}()
 
-	profile, err := libclient.StatusCurrent(cf.HomePath, cf.Proxy)
-	if err != nil {
-		return trace.Wrap(err)
+	if cf.LocalProxyNoClientAuth {
+		err = dbProxyAuthTpl.Execute(os.Stdout, map[string]string{
+			"database": database.ServiceName,
+			"address":  listener.Addr().String(),
+			"ca":       profile.CACertPathForCluster(rootCluster),
+			"cert":     certFile,
+			"key":      keyFile,
+		})
+	} else {
+		err = dbProxyTpl.Execute(os.Stdout, map[string]string{
+			"database": database.ServiceName,
+			"address":  listener.Addr().String(),
+			"ca":       profile.CACertPathForCluster(rootCluster),
+			"cert":     profile.DatabaseCertPathForCluster(cf.SiteName, database.ServiceName),
+			"key":      profile.KeyPath(),
+		})
 	}
-
-	err = dbProxyTpl.Execute(os.Stdout, map[string]string{
-		"database": database.ServiceName,
-		"address":  listener.Addr().String(),
-		"ca":       profile.CACertPathForCluster(rootCluster),
-		"cert":     profile.DatabaseCertPathForCluster(cf.SiteName, database.ServiceName),
-		"key":      profile.KeyPath(),
-	})
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -350,4 +371,14 @@ Use following credentials to connect to the {{.database}} proxy:
   ca_file={{.ca}}
   cert_file={{.cert}}
   key_file={{.key}}
+`))
+
+// dbProxyAuthTpl is the message that's printed for an authenticated db proxy.
+var dbProxyAuthTpl = template.Must(template.New("").Parse(
+	`Started authenticated DB proxy on {{.address}} with the following credentials:
+  cert_file={{.cert}}
+  key_file={{.key}}
+
+Use the following CA to connect to the {{.database}} proxy:
+  ca_file={{.ca}}
 `))

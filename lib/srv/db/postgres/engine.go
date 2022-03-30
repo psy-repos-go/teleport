@@ -59,11 +59,14 @@ type Engine struct {
 	common.EngineConfig
 	// client is a client connection.
 	client *pgproto3.Backend
+	// clientConn is a raw client connection.
+	clientConn net.Conn
 }
 
 // InitializeConnection initializes the client connection.
 func (e *Engine) InitializeConnection(clientConn net.Conn, sessionCtx *common.Session) error {
 	e.client = pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn)
+	e.clientConn = clientConn
 
 	// The proxy is supposed to pass a startup message it received from
 	// the psql client over to us, so wait for it and extract database
@@ -166,24 +169,35 @@ func (e *Engine) handleStartup(client *pgproto3.Backend, sessionCtx *common.Sess
 		return trace.Wrap(err)
 	}
 	e.Log.Debugf("Received startup message: %#v.", startupMessageI)
-	startupMessage, ok := startupMessageI.(*pgproto3.StartupMessage)
-	if !ok {
-		return trace.BadParameter("expected *pgproto3.StartupMessage, got %T", startupMessageI)
-	}
-	// Pass startup parameters received from the client along (this is how the
-	// client sets default date style format for example), but remove database
-	// name and user from them.
-	for key, value := range startupMessage.Parameters {
-		switch key {
-		case "database":
-			sessionCtx.DatabaseName = value
-		case "user":
-			sessionCtx.DatabaseUser = value
-		default:
-			sessionCtx.StartupParameters[key] = value
+	switch startupMessageI.(type) {
+	case *pgproto3.StartupMessage:
+		startupMessage, ok := startupMessageI.(*pgproto3.StartupMessage)
+		if !ok {
+			return trace.BadParameter("expected *pgproto3.StartupMessage, got %T", startupMessageI)
 		}
+		// Pass startup parameters received from the client along (this is how the
+		// client sets default date style format for example), but remove database
+		// name and user from them.
+		for key, value := range startupMessage.Parameters {
+			switch key {
+			case "database":
+				sessionCtx.DatabaseName = value
+			case "user":
+				sessionCtx.DatabaseUser = value
+			default:
+				sessionCtx.StartupParameters[key] = value
+			}
+		}
+		return nil
+	case *pgproto3.SSLRequest:
+		// Send 'N' back to indicate client should connect without TLS.
+		_, err := e.clientConn.Write([]byte("N"))
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		return e.handleStartup(client, sessionCtx)
 	}
-	return nil
+	return trace.BadParameter("expected *pgproto3.StartupMessage or *pgproto3.SSLRequest, got %T", startupMessageI)
 }
 
 func (e *Engine) checkAccess(ctx context.Context, sessionCtx *common.Session) error {

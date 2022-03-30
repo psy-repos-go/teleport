@@ -179,6 +179,7 @@ func (s *SessionRegistry) emitSessionJoinEvent(ctx *ServerContext) {
 
 // OpenSession either joins an existing session or starts a new session.
 func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *ServerContext) error {
+
 	session := ctx.getSession()
 	if session != nil {
 		ctx.Infof("Joining existing session %v.", session.id)
@@ -206,6 +207,16 @@ func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *Ser
 
 		return nil
 	}
+	if ctx.Identity.RoleSet.AutoCreateUser(s.srv.GetInfo()) && ctx.Identity.TeleportUser == ctx.Identity.Login {
+		closer, created, err := createTemporaryUserAndAddToTeleportGroup(ctx.Identity.TeleportUser, []string{})
+		if err != nil && !trace.IsAlreadyExists(err) {
+			return trace.Wrap(err)
+		}
+		if created {
+			ctx.AddCloser(closer)
+		}
+	}
+
 	// session not found? need to create one. start by getting/generating an ID for it
 	sid, found := ctx.GetEnv(sshutils.SessionEnvVar)
 	if !found {
@@ -1684,7 +1695,7 @@ func (p *party) Close() (err error) {
 		close(p.termSizeC)
 		err = p.ch.Close()
 	})
-	return err
+	return trace.Wrap(err)
 }
 
 func (s *session) trackerGet() (types.SessionTracker, error) {

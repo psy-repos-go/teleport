@@ -23,6 +23,8 @@ import (
 	"github.com/gravitational/teleport/api/client/webclient"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/utils"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/check.v1"
@@ -497,6 +499,51 @@ func TestApplyProxySettings(t *testing.T) {
 			require.EqualValues(t, test.tcConfigOut, tc.Config)
 		})
 	}
+}
+
+type testAgent struct {
+	agent.Agent
+}
+
+type mockSigner struct {
+	ssh.Signer
+}
+
+func (s *mockSigner) PublicKey() ssh.PublicKey {
+	return &ssh.Certificate{
+		ValidPrincipals: []string{"VALID"},
+	}
+}
+
+// Signers implements agent.Agent
+func (*testAgent) Signers() ([]ssh.Signer, error) {
+	return []ssh.Signer{&mockSigner{}}, nil
+}
+
+func TestGetProxySSHPrincipal(t *testing.T) {
+	client, err := NewClient(&Config{
+		Username:         "xyz",
+		HostLogin:        "xyz",
+		WebProxyAddr:     "localhost",
+		SkipLocalAuth:    true,
+		UseKeyPrincipals: true, // causes VALID to be returned, as key was used
+		Agent:            &testAgent{},
+		AuthMethods:      []ssh.AuthMethod{ssh.Password("xyz") /* placeholder authmethod */},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "VALID", client.getProxySSHPrincipal())
+
+	client, err = NewClient(&Config{
+		Username:         "xyz",
+		HostLogin:        "xyz",
+		WebProxyAddr:     "localhost",
+		SkipLocalAuth:    true,
+		UseKeyPrincipals: false, // causes xyz to be returned, as key principals were not used
+		Agent:            &testAgent{},
+		AuthMethods:      []ssh.AuthMethod{ssh.Password("xyz") /* placeholder authmethod */},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "xyz", client.getProxySSHPrincipal())
 }
 
 func TestParseSearchKeywords(t *testing.T) {

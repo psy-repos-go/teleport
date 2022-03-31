@@ -176,11 +176,11 @@ func onProxyCommandDB(cf *CLIConf) error {
 	// If user requested no client auth, open an authenticated tunnel using
 	// client cert/key of the database.
 	certFile := cf.LocalProxyCertFile
-	if certFile == "" && cf.LocalProxyNoClientAuth {
+	if certFile == "" && cf.LocalProxyTLS {
 		certFile = profile.DatabaseCertPathForCluster(cf.SiteName, database.ServiceName)
 	}
 	keyFile := cf.LocalProxyKeyFile
-	if keyFile == "" && cf.LocalProxyNoClientAuth {
+	if keyFile == "" && cf.LocalProxyTLS {
 		keyFile = profile.KeyPath()
 	}
 
@@ -200,7 +200,7 @@ func onProxyCommandDB(cf *CLIConf) error {
 		lp.Close()
 	}()
 
-	if cf.LocalProxyNoClientAuth {
+	if cf.LocalProxyTLS {
 		err = dbProxyAuthTpl.Execute(os.Stdout, map[string]string{
 			"database": database.ServiceName,
 			"address":  listener.Addr().String(),

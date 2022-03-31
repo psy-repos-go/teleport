@@ -324,6 +324,8 @@ func (s *ProxyServer) handleConnection(conn net.Conn) error {
 	switch proxyCtx.Identity.RouteToDatabase.Protocol {
 	case defaults.ProtocolSQLServer:
 		return s.SQLServerProxy().HandleConnection(s.closeCtx, proxyCtx, tlsConn)
+	case defaults.ProtocolMySQL:
+		return s.MySQLProxy().HandleConnectionWithProxyContext(s.closeCtx, proxyCtx, tlsConn)
 	}
 	serviceConn, err := s.Connect(s.closeCtx, proxyCtx)
 	if err != nil {

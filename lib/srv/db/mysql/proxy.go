@@ -57,20 +57,11 @@ type Proxy struct {
 // HandleConnection accepts connection from a MySQL client, authenticates
 // it and proxies it to an appropriate database service.
 func (p *Proxy) HandleConnection(ctx context.Context, clientConn net.Conn) (err error) {
-	return p.HandleConnectionWithProxyContext(ctx, nil, clientConn)
-}
-
-//
-func (p *Proxy) HandleConnectionWithProxyContext(ctx context.Context, proxyCtx *common.ProxyContext, clientConn net.Conn) (err error) {
 	// Wrap the client connection in the connection that can detect the protocol
 	// by peeking into the first few bytes. This is needed to be able to detect
 	// proxy protocol which otherwise would interfere with MySQL protocol.
 	conn := multiplexer.NewConn(clientConn)
-	var tlsConfig *tls.Config
-	if proxyCtx == nil {
-		tlsConfig = p.TLSConfig
-	}
-	server := p.makeServer(conn, tlsConfig)
+	server := makeServer(conn, p.TLSConfig)
 	// If any error happens, make sure to send it back to the client, so it
 	// has a chance to close the connection from its side.
 	defer func() {
@@ -125,12 +116,19 @@ func (p *Proxy) HandleConnectionWithProxyContext(ctx context.Context, proxyCtx *
 	if server.GetDatabase() != "" {
 		proxyCtx.Identity.RouteToDatabase.Database = server.GetDatabase()
 	}
+}
 
+//
+func (p *Proxy) HandleAuthorizedConnection(ctx context.Context, proxyCtx *common.ProxyContext, clientConn net.Conn) (err error) {
+}
+
+func (p *Proxy) handleConnection(ctx context.Context, proxyCtx *common.ProxyContext, server *server.Conn, clientConn net.Conn) (err error) {
 	serviceConn, err := p.Service.Connect(ctx, proxyCtx)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	defer serviceConn.Close()
+
 	// Before replying OK to the client which would make the client consider
 	// auth completed, wait for OK packet from db service indicating auth
 	// success.
@@ -138,12 +136,14 @@ func (p *Proxy) HandleConnectionWithProxyContext(ctx context.Context, proxyCtx *
 	if err != nil {
 		return trace.Wrap(err)
 	}
+
 	// Auth has completed, the client enters command phase, start proxying
 	// all messages back-and-forth.
-	err = p.Service.Proxy(ctx, proxyCtx, tlsConn, serviceConn)
+	err = p.Service.Proxy(ctx, proxyCtx, clientConn, serviceConn)
 	if err != nil {
 		return trace.Wrap(err)
 	}
+
 	return nil
 }
 
@@ -157,7 +157,7 @@ func (p *credentialProvider) GetCredential(_ string) (string, bool, error) { ret
 
 // makeServer creates a MySQL server from the accepted client connection that
 // provides access to various parts of the handshake.
-func (p *Proxy) makeServer(clientConn net.Conn, tlsConfig *tls.Config) *server.Conn {
+func makeServer(clientConn net.Conn, tlsConfig *tls.Config) *server.Conn {
 	return server.MakeConn(
 		clientConn,
 		server.NewServer(

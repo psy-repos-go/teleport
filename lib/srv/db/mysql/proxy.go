@@ -61,7 +61,7 @@ func (p *Proxy) HandleConnection(ctx context.Context, clientConn net.Conn) (err 
 	// by peeking into the first few bytes. This is needed to be able to detect
 	// proxy protocol which otherwise would interfere with MySQL protocol.
 	conn := multiplexer.NewConn(clientConn)
-	server := makeServer(conn, p.TLSConfig)
+	server := p.makeServer(conn)
 	// If any error happens, make sure to send it back to the client, so it
 	// has a chance to close the connection from its side.
 	defer func() {
@@ -93,42 +93,20 @@ func (p *Proxy) HandleConnection(ctx context.Context, clientConn net.Conn) (err 
 	}
 	defer releaseConn()
 
-	if proxyCtx == nil {
-		// First part of the handshake completed and the connection has been
-		// upgraded to TLS so now we can look at the client certificate and
-		// see which database service to route the connection to.
-		tlsConn, ok := tlsConn.(*tls.Conn)
-		if !ok {
-			return trace.BadParameter("expected TLS connection")
-		}
-		proxyCtx, err = p.Service.Authorize(ctx, tlsConn, common.ConnectParams{
-			User:     server.GetUser(),
-			Database: server.GetDatabase(),
-			ClientIP: clientIP,
-		})
-		if err != nil {
-			return trace.Wrap(err)
-		}
+	proxyCtx, err := p.Service.Authorize(ctx, tlsConn, common.ConnectParams{
+		User:     server.GetUser(),
+		Database: server.GetDatabase(),
+		ClientIP: clientIP,
+	})
+	if err != nil {
+		return trace.Wrap(err)
 	}
-	if server.GetUser() != "" {
-		proxyCtx.Identity.RouteToDatabase.Username = server.GetUser()
-	}
-	if server.GetDatabase() != "" {
-		proxyCtx.Identity.RouteToDatabase.Database = server.GetDatabase()
-	}
-}
 
-//
-func (p *Proxy) HandleAuthorizedConnection(ctx context.Context, proxyCtx *common.ProxyContext, clientConn net.Conn) (err error) {
-}
-
-func (p *Proxy) handleConnection(ctx context.Context, proxyCtx *common.ProxyContext, server *server.Conn, clientConn net.Conn) (err error) {
 	serviceConn, err := p.Service.Connect(ctx, proxyCtx)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	defer serviceConn.Close()
-
 	// Before replying OK to the client which would make the client consider
 	// auth completed, wait for OK packet from db service indicating auth
 	// success.
@@ -136,14 +114,12 @@ func (p *Proxy) handleConnection(ctx context.Context, proxyCtx *common.ProxyCont
 	if err != nil {
 		return trace.Wrap(err)
 	}
-
 	// Auth has completed, the client enters command phase, start proxying
 	// all messages back-and-forth.
-	err = p.Service.Proxy(ctx, proxyCtx, clientConn, serviceConn)
+	err = p.Service.Proxy(ctx, proxyCtx, tlsConn, serviceConn)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-
 	return nil
 }
 
@@ -157,7 +133,7 @@ func (p *credentialProvider) GetCredential(_ string) (string, bool, error) { ret
 
 // makeServer creates a MySQL server from the accepted client connection that
 // provides access to various parts of the handshake.
-func makeServer(clientConn net.Conn, tlsConfig *tls.Config) *server.Conn {
+func (p *Proxy) makeServer(clientConn net.Conn) *server.Conn {
 	return server.MakeConn(
 		clientConn,
 		server.NewServer(
@@ -165,7 +141,9 @@ func makeServer(clientConn net.Conn, tlsConfig *tls.Config) *server.Conn {
 			mysql.DEFAULT_COLLATION_ID,
 			mysql.AUTH_NATIVE_PASSWORD,
 			nil,
-			tlsConfig),
+			// TLS config can actually be nil if the client is connecting
+			// through local TLS proxy without TLS.
+			p.TLSConfig),
 		&credentialProvider{},
 		server.EmptyHandler{})
 }
@@ -173,7 +151,7 @@ func makeServer(clientConn net.Conn, tlsConfig *tls.Config) *server.Conn {
 // performHandshake performs the initial handshake between MySQL client and
 // this server, up to the point where the client sends us a certificate for
 // authentication, and returns the upgraded connection.
-func (p *Proxy) performHandshake(conn *multiplexer.Conn, server *server.Conn) (net.Conn, error) {
+func (p *Proxy) performHandshake(conn *multiplexer.Conn, server *server.Conn) (*tls.Conn, error) {
 	// MySQL protocol is server-initiated which means the client will expect
 	// server to send initial handshake message.
 	err := server.WriteInitialHandshake()
@@ -191,15 +169,21 @@ func (p *Proxy) performHandshake(conn *multiplexer.Conn, server *server.Conn) (n
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return server.Conn.Conn, nil
-	// // First part of the handshake completed and the connection has been
-	// // upgraded to TLS so now we can look at the client certificate and
-	// // see which database service to route the connection to.
-	// tlsConn, ok := server.Conn.Conn.(*tls.Conn)
-	// if !ok {
-	// 	return nil, trace.BadParameter("expected TLS connection")
-	// }
-	// return tlsConn, nil
+	// First part of the handshake completed and the connection has been
+	// upgraded to TLS so now we can look at the client certificate and
+	// see which database service to route the connection to.
+	switch c := server.Conn.Conn.(type) {
+	case *tls.Conn:
+		return c, nil
+	case *multiplexer.Conn:
+		tlsConn, ok := c.Conn.(*tls.Conn)
+		if !ok {
+			return nil, trace.BadParameter("expected TLS connection, got: %T", c)
+		}
+		return tlsConn, nil
+	}
+	return nil, trace.BadParameter("expected *tls.Conn or *multiplexer.Conn, got: %T",
+		server.Conn.Conn)
 }
 
 // maybeReadProxyLine peeks into the connection to see if instead of regular

@@ -322,10 +322,12 @@ func (s *ProxyServer) handleConnection(conn net.Conn) error {
 		return trace.Wrap(err)
 	}
 	switch proxyCtx.Identity.RouteToDatabase.Protocol {
+	case defaults.ProtocolPostgres:
+		return s.PostgresProxyNoTLS().HandleConnection(s.closeCtx, tlsConn)
+	case defaults.ProtocolMySQL:
+		return s.MySQLProxyNoTLS().HandleConnection(s.closeCtx, tlsConn)
 	case defaults.ProtocolSQLServer:
 		return s.SQLServerProxy().HandleConnection(s.closeCtx, proxyCtx, tlsConn)
-	case defaults.ProtocolMySQL:
-		return s.MySQLProxy().HandleConnectionWithProxyContext(s.closeCtx, proxyCtx, tlsConn)
 	}
 	serviceConn, err := s.Connect(s.closeCtx, proxyCtx)
 	if err != nil {
@@ -350,6 +352,16 @@ func (s *ProxyServer) PostgresProxy() *postgres.Proxy {
 	}
 }
 
+// PostgresProxyNoTLS returns a new instance of the non-TLS Postgres proxy.
+func (s *ProxyServer) PostgresProxyNoTLS() *postgres.Proxy {
+	return &postgres.Proxy{
+		Middleware: s.middleware,
+		Service:    s,
+		Limiter:    s.cfg.Limiter,
+		Log:        s.log,
+	}
+}
+
 // MySQLProxy returns a new instance of the MySQL protocol aware proxy.
 func (s *ProxyServer) MySQLProxy() *mysql.Proxy {
 	return &mysql.Proxy{
@@ -361,15 +373,19 @@ func (s *ProxyServer) MySQLProxy() *mysql.Proxy {
 	}
 }
 
+// MySQLProxy returns a new instance of the non-TLS MySQL proxy.
+func (s *ProxyServer) MySQLProxyNoTLS() *mysql.Proxy {
+	return &mysql.Proxy{
+		Middleware: s.middleware,
+		Service:    s,
+		Limiter:    s.cfg.Limiter,
+		Log:        s.log,
+	}
+}
+
 // SQLServerProxy returns a new instance of the SQL Server protocol aware proxy.
 func (s *ProxyServer) SQLServerProxy() *sqlserver.Proxy {
-	// SQL Server clients don't support client certificates, connections
-	// come over TLS routing tunnel.
-	tlsConf := s.cfg.TLSConfig.Clone()
-	tlsConf.ClientAuth = tls.NoClientCert
-	tlsConf.GetConfigForClient = nil
 	return &sqlserver.Proxy{
-		TLSConfig:  tlsConf,
 		Middleware: s.middleware,
 		Service:    s,
 		Log:        s.log,

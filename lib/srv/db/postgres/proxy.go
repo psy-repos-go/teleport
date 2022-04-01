@@ -19,7 +19,6 @@ package postgres
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 
 	"github.com/gravitational/teleport/lib/auth"
@@ -53,7 +52,6 @@ type Proxy struct {
 // HandleConnection accepts connection from a Postgres client, authenticates
 // it and proxies it to an appropriate database service.
 func (p *Proxy) HandleConnection(ctx context.Context, clientConn net.Conn) (err error) {
-	fmt.Printf("--> Received connection: %T\n", clientConn)
 	startupMessage, tlsConn, backend, err := p.handleStartup(ctx, clientConn)
 	if err != nil {
 		return trace.Wrap(err)
@@ -127,14 +125,23 @@ func (p *Proxy) handleStartup(ctx context.Context, clientConn net.Conn) (*pgprot
 	// https://www.postgresql.org/docs/13/protocol-flow.html#id-1.10.5.7.11
 	switch m := startupMessage.(type) {
 	case *pgproto3.SSLRequest:
-		// Send 'S' back to indicate TLS support to the client.
-		_, err := clientConn.Write([]byte("S"))
-		if err != nil {
-			return nil, nil, nil, trace.Wrap(err)
+		if p.TLSConfig == nil {
+			// Send 'N' back to make the client connect without TLS. Happens
+			// when client connects through the local TLS proxy.
+			_, err := clientConn.Write([]byte("N"))
+			if err != nil {
+				return nil, nil, nil, trace.Wrap(err)
+			}
+		} else {
+			// Send 'S' back to indicate TLS support to the client.
+			_, err := clientConn.Write([]byte("S"))
+			if err != nil {
+				return nil, nil, nil, trace.Wrap(err)
+			}
+			// Upgrade the connection to TLS and wait for the next message
+			// which should be of the StartupMessage type.
+			clientConn = tls.Server(clientConn, p.TLSConfig)
 		}
-		// Upgrade the connection to TLS and wait for the next message
-		// which should be of the StartupMessage type.
-		clientConn = tls.Server(clientConn, p.TLSConfig)
 		return p.handleStartup(ctx, clientConn)
 	case *pgproto3.StartupMessage:
 		// TLS connection between the client and this proxy has been

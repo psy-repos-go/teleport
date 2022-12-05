@@ -160,7 +160,7 @@ require (
 	github.com/mailgun/minheap v0.0.0-20170619185613-3dbe6c6bf55f // indirect
 )
 
-require github.com/googleapis/gax-go/v2 v2.6.0
+require github.com/googleapis/gax-go/v2 v2.7.0
 
 require (
 	cloud.google.com/go v0.105.0 // indirect

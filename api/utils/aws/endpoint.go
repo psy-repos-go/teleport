@@ -47,6 +47,14 @@ func IsRedshiftEndpoint(uri string) bool {
 	return isAWSServiceEndpoint(uri, RedshiftServiceName)
 }
 
+// IsRedshiftServerlessEndpoint returns true if the input URI is an Redshift
+// Serverless endpoint.
+//
+// https://docs.aws.amazon.com/redshift/latest/mgmt/serverless-connecting.html
+func IsRedshiftServerlessEndpoint(uri string) bool {
+	return isAWSServiceEndpoint(uri, RedshiftServerlessServiceName)
+}
+
 // IsElastiCacheEndpoint returns true if the input URI is an ElastiCache
 // endpoint.
 func IsElastiCacheEndpoint(uri string) bool {
@@ -57,6 +65,18 @@ func IsElastiCacheEndpoint(uri string) bool {
 // endpoint.
 func IsMemoryDBEndpoint(uri string) bool {
 	return isAWSServiceEndpoint(uri, MemoryDBSServiceName)
+}
+
+// IsKeyspacesEndpoint returns true if input URI is an AWS Keyspaces endpoint.
+// https://docs.aws.amazon.com/keyspaces/latest/devguide/programmatic.endpoints.html
+func IsKeyspacesEndpoint(uri string) bool {
+	hasCassandraPrefix := strings.HasPrefix(uri, "cassandra.") || strings.HasPrefix(uri, "cassandra-fips.")
+	return hasCassandraPrefix && IsAWSEndpoint(uri)
+}
+
+// IsOpenSearchEndpoint returns true if input URI is an OpenSearch endpoint.
+func IsOpenSearchEndpoint(uri string) bool {
+	return isAWSServiceEndpoint(uri, OpenSearchServiceName)
 }
 
 // RDSEndpointDetails contains information about an RDS endpoint.
@@ -73,6 +93,12 @@ type RDSEndpointDetails struct {
 	ProxyCustomEndpointName string
 	// Region is the AWS region the database resides in.
 	Region string
+	// EndpointType specifies the type of the endpoint, if available.
+	//
+	// Note that the endpoint type of RDS Proxies are determined by their
+	// targets, so the endpoint type will be empty for RDS Proxies here as it
+	// cannot be decided by the endpoint URL itself.
+	EndpointType string
 }
 
 // IsProxy returns true if the RDS endpoint is an RDS Proxy.
@@ -169,12 +195,21 @@ func parseRDSWithoutSuffixes(endpoint string, parts []string, region string) (*R
 			return &RDSEndpointDetails{
 				ClusterCustomEndpointName: parts[0],
 				Region:                    region,
+				EndpointType:              RDSEndpointTypeCustom,
+			}, nil
+
+		case strings.HasPrefix(parts[1], "cluster-ro-"):
+			return &RDSEndpointDetails{
+				ClusterID:    parts[0],
+				Region:       region,
+				EndpointType: RDSEndpointTypeReader,
 			}, nil
 
 		case strings.HasPrefix(parts[1], "cluster-"):
 			return &RDSEndpointDetails{
-				ClusterID: parts[0],
-				Region:    region,
+				ClusterID:    parts[0],
+				Region:       region,
+				EndpointType: RDSEndpointTypePrimary,
 			}, nil
 
 		case strings.HasPrefix(parts[1], "proxy-"):
@@ -185,8 +220,9 @@ func parseRDSWithoutSuffixes(endpoint string, parts []string, region string) (*R
 
 		default:
 			return &RDSEndpointDetails{
-				InstanceID: parts[0],
-				Region:     region,
+				InstanceID:   parts[0],
+				Region:       region,
+				EndpointType: RDSEndpointTypeInstance,
 			}, nil
 		}
 
@@ -246,6 +282,64 @@ func parseRedshiftCNEndpoint(endpoint string) (clusterID, region string, err err
 	return parts[0], parts[3], nil
 }
 
+// RedshiftServerlessEndpointDetails contains information about an Redshift
+// Serverless endpoint.
+type RedshiftServerlessEndpointDetails struct {
+	// WorkgroupName is the name of the workgroup.
+	WorkgroupName string
+	// EndpointName is the name of the VPC endpoint.
+	EndpointName string
+	// AccountID is the AWS Account ID.
+	AccountID string
+	// Region is the AWS region the database resides in.
+	Region string
+}
+
+// ParseRedshiftServerlessEndpoint extracts name, AWS Account ID, and region
+// from the provided Redshift Serverless endpoint.
+func ParseRedshiftServerlessEndpoint(endpoint string) (details *RedshiftServerlessEndpointDetails, err error) {
+	if strings.ContainsRune(endpoint, ':') {
+		endpoint, _, err = net.SplitHostPort(endpoint)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+	}
+
+	if strings.HasSuffix(endpoint, AWSCNEndpointSuffix) {
+		// TODO(greedy52) add AWS China support when Redshift Serverless come to those regions.
+		return nil, trace.NotImplemented("failed to parse %v as Redshift Serverless endpoint: AWS China regions are not supported yet", endpoint)
+	}
+	return parseRedshiftServerlessEndpoint(endpoint)
+}
+
+// parseRedshiftServerlessEndpoint extracts name, AWS account ID, and region
+// from the provided Redshift Serverless endpoint for standard regions.
+//
+// Workgroup endpoint looks like this:
+// <workgroup-name>.<account-id>.<region>.redshift-serverless.amazonaws.com
+//
+// VPC endpoint looks like this:
+// <vpc-endpoint-name>-endpoint-<some-hash>.<account-id>.<region>.redshift-serverless.amazonaws.com
+func parseRedshiftServerlessEndpoint(endpoint string) (*RedshiftServerlessEndpointDetails, error) {
+	parts := strings.Split(endpoint, ".")
+	if !strings.HasSuffix(endpoint, AWSEndpointSuffix) || len(parts) != 6 || parts[3] != RedshiftServerlessServiceName {
+		return nil, trace.BadParameter("failed to parse %v as Redshift Serverless endpoint", endpoint)
+	}
+	if endpointName, _, found := strings.Cut(parts[0], "-endpoint-"); found {
+		return &RedshiftServerlessEndpointDetails{
+			EndpointName: endpointName,
+			AccountID:    parts[1],
+			Region:       parts[2],
+		}, nil
+	}
+
+	return &RedshiftServerlessEndpointDetails{
+		WorkgroupName: parts[0],
+		AccountID:     parts[1],
+		Region:        parts[2],
+	}, nil
+}
+
 // RedisEndpointInfo describes details extracted from a ElastiCache or MemoryDB
 // Redis endpoint.
 type RedisEndpointInfo struct {
@@ -279,6 +373,25 @@ const (
 	MemoryDBClusterEndpoint = "cluster"
 	// MemoryDBNodeEndpoint is the endpoint of an individual MemoryDB node.
 	MemoryDBNodeEndpoint = "node"
+
+	// OpenSearchDefaultEndpoint is the default endpoint for domain.
+	OpenSearchDefaultEndpoint = "default"
+	// OpenSearchCustomEndpoint is the custom endpoint configured for domain.
+	OpenSearchCustomEndpoint = "custom"
+	// OpenSearchVPCEndpoint is the VPC endpoint for domain.
+	OpenSearchVPCEndpoint = "vpc"
+
+	// RDSEndpointTypePrimary is the endpoint that specifies the connection for
+	// the primary instance of the RDS cluster.
+	RDSEndpointTypePrimary = "primary"
+	// RDSEndpointTypeReader is the endpoint that load-balances connections
+	// across the Aurora Replicas that are available in an RDS cluster.
+	RDSEndpointTypeReader = "reader"
+	// RDSEndpointTypeCustom is the endpoint that specifies one of the custom
+	// endpoints associated with the RDS cluster.
+	RDSEndpointTypeCustom = "custom"
+	// RDSEndpointTypeInstance is the endpoint of an RDS DB instance.
+	RDSEndpointTypeInstance = "instance"
 )
 
 // ParseElastiCacheEndpoint extracts the details from the provided
@@ -293,7 +406,7 @@ func ParseElastiCacheEndpoint(endpoint string) (*RedisEndpointInfo, error) {
 
 	// Remove partition suffix. Note that endpoints for CN regions use the same
 	// format except they end with AWSCNEndpointSuffix.
-	endpointWithoutSuffix, err := removePartitionSuffix(endpoint)
+	endpointWithoutSuffix, _, err := removePartitionSuffix(endpoint)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -398,7 +511,7 @@ func ParseElastiCacheEndpoint(endpoint string) (*RedisEndpointInfo, error) {
 		}, nil
 	}
 
-	return nil, trace.BadParameter("unknown ElastiCache Redis endpoint format")
+	return nil, trace.BadParameter("unknown ElastiCache Redis endpoint format %q", endpoint)
 }
 
 // isElasticCacheShardID returns true if the input part is in shard ID format.
@@ -458,7 +571,7 @@ func ParseMemoryDBEndpoint(endpoint string) (*RedisEndpointInfo, error) {
 	//
 	// Unlike RDS/Redshift endpoints, the service subdomain is before region.
 	// Unlike ElastiCache endpoints, MemoryDB uses full region name.
-	endpointWithoutSuffix, err := removePartitionSuffix(endpoint)
+	endpointWithoutSuffix, _, err := removePartitionSuffix(endpoint)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -534,16 +647,16 @@ func removeSchemaAndPort(endpoint string) (string, error) {
 	return parsedURL.Hostname(), nil
 }
 
-func removePartitionSuffix(endpoint string) (string, error) {
+func removePartitionSuffix(endpoint string) (string, string, error) {
 	switch {
 	case strings.HasSuffix(endpoint, AWSEndpointSuffix):
-		return strings.TrimSuffix(endpoint, AWSEndpointSuffix), nil
+		return strings.TrimSuffix(endpoint, AWSEndpointSuffix), AWSEndpointSuffix, nil
 
 	case strings.HasSuffix(endpoint, AWSCNEndpointSuffix):
-		return strings.TrimSuffix(endpoint, AWSCNEndpointSuffix), nil
+		return strings.TrimSuffix(endpoint, AWSCNEndpointSuffix), AWSCNEndpointSuffix, nil
 
 	default:
-		return "", trace.BadParameter("%v is not a valid AWS endpoint", endpoint)
+		return "", "", trace.BadParameter("%v is not a valid AWS endpoint", endpoint)
 	}
 }
 
@@ -566,18 +679,32 @@ const (
 	// RedshiftServiceName is the service name for AWS Redshift.
 	RedshiftServiceName = "redshift"
 
+	// RedshiftServerlessServiceName is the service name for AWS Redshift Serverless.
+	RedshiftServerlessServiceName = "redshift-serverless"
+
 	// ElastiCacheServiceName is the service name for AWS ElastiCache.
 	ElastiCacheServiceName = "cache"
 
 	// MemoryDBSServiceName is the service name for AWS MemoryDB.
 	MemoryDBSServiceName = "memorydb"
+
+	// DynamoDBServiceName is the service name for AWS DynamoDB.
+	DynamoDBServiceName = "dynamodb"
+	// DynamoDBFipsServiceName is the fips variant service name for AWS DynamoDB.
+	DynamoDBFipsServiceName = "dynamodb-fips"
+	// DynamoDBStreamsServiceName is the AWS DynamoDB Streams service name.
+	DynamoDBStreamsServiceName = "streams.dynamodb"
+	// DAXServiceName is the AWS DynamoDB Accelerator service name.
+	DAXServiceName = "dax"
+
+	// OpenSearchServiceName is the AWS OpenSearch service name.
+	OpenSearchServiceName = "es"
 )
 
 // CassandraEndpointURLForRegion returns a Cassandra endpoint based on the provided region.
 // https://docs.aws.amazon.com/keyspaces/latest/devguide/programmatic.endpoints.html
 func CassandraEndpointURLForRegion(region string) string {
-	switch strings.ToLower(region) {
-	case "cn-north-1", "cn-northwest-1":
+	if IsCNRegion(region) {
 		return fmt.Sprintf("cassandra.%s%s:9142", region, AWSCNEndpointSuffix)
 	}
 	return fmt.Sprintf("cassandra.%s%s:9142", region, AWSEndpointSuffix)
@@ -587,16 +714,145 @@ func CassandraEndpointURLForRegion(region string) string {
 // where endpoint looks like cassandra.us-east-2.amazonaws.com
 // https://docs.aws.amazon.com/keyspaces/latest/devguide/programmatic.endpoints.html
 func CassandraEndpointRegion(endpoint string) (string, error) {
-	endpoint, err := removeSchemaAndPort(endpoint)
+	parts, _, err := extractAWSEndpointParts(endpoint)
 	if err != nil {
 		return "", trace.Wrap(err)
 	}
-
-	endpoint = strings.TrimSuffix(endpoint, AWSCNEndpointSuffix)
-	endpoint = strings.TrimSuffix(endpoint, AWSEndpointSuffix)
-	parts := strings.Split(endpoint, ".")
 	if len(parts) != 2 {
 		return "", trace.BadParameter("invalid Cassandra endpoint")
 	}
 	return parts[1], nil
+}
+
+// DynamoDBEndpointInfo describes info extracted from a DynamoDB endpoint.
+type DynamoDBEndpointInfo struct {
+	// Service is the service subdomain of the endpoint, for example "dynamodb" or "dax".
+	Service string
+	// Region is the AWS region for the endpoint, for example "us-west-1".
+	Region string
+	// Partition is the AWS partition for the endpoint, for example ".amazonaws.com"
+	Partition string
+}
+
+// ParseDynamoDBEndpoint parses and extract info from the provided DynamoDB endpoint.
+func ParseDynamoDBEndpoint(endpoint string) (*DynamoDBEndpointInfo, error) {
+	endpoint = strings.ToLower(endpoint)
+	parts, partition, err := extractAWSEndpointParts(endpoint)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	switch len(parts) {
+	case 2, 3:
+	default:
+		return nil, trace.BadParameter("invalid DynamoDB endpoint %q", endpoint)
+	}
+	info := &DynamoDBEndpointInfo{
+		Service:   strings.Join(parts[:len(parts)-1], "."),
+		Region:    parts[len(parts)-1],
+		Partition: partition,
+	}
+
+	// check for recognized service name.
+	switch info.Service {
+	case DynamoDBServiceName, DynamoDBFipsServiceName,
+		DynamoDBStreamsServiceName, DAXServiceName:
+	default:
+		return nil, trace.BadParameter("invalid DynamoDB endpoint %q", endpoint)
+	}
+
+	// check that the partition is valid for the region.
+	if info.Region == "" || info.Partition == "" {
+		return nil, trace.BadParameter("invalid DynamoDB endpoint %q", endpoint)
+	}
+	switch {
+	case info.Partition == AWSCNEndpointSuffix && IsCNRegion(info.Region):
+	case info.Partition == AWSEndpointSuffix && !IsCNRegion(info.Region):
+	default:
+		return nil, trace.BadParameter("invalid AWS region %q for AWS partition %q",
+			info.Region, info.Partition)
+	}
+	return info, nil
+}
+
+// OpenSearchEndpointInfo describes info extracted from an AWS endpoint.
+type OpenSearchEndpointInfo struct {
+	// Service is the service subdomain of the endpoint. Only "es" allowed for now.
+	Service string
+	// Region is the AWS region for the endpoint, for example "us-west-1".
+	Region string
+	// Partition is the AWS partition for the endpoint, for example ".amazonaws.com"
+	Partition string
+}
+
+// ParseOpensearchEndpoint parses and extract info from the provided OpenSearch endpoint.
+func ParseOpensearchEndpoint(endpoint string) (*OpenSearchEndpointInfo, error) {
+	endpoint = strings.ToLower(endpoint)
+	parts, partition, err := extractAWSEndpointParts(endpoint)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	if len(parts) != 3 {
+		return nil, trace.BadParameter("invalid OpenSearch endpoint %q, wrong number of parts %v", endpoint, len(parts))
+	}
+
+	info := &OpenSearchEndpointInfo{
+		Region:    parts[len(parts)-2],
+		Service:   parts[len(parts)-1],
+		Partition: partition,
+	}
+
+	// check for recognized service name.
+	if info.Service != OpenSearchServiceName {
+		return nil, trace.BadParameter("invalid OpenSearch endpoint %q, invalid service %q", endpoint, info.Service)
+	}
+
+	// check that the partition is valid for the region.
+	switch {
+	case info.Region == "" || info.Partition == "":
+		return nil, trace.BadParameter("invalid OpenSearch endpoint %q, empty partition and region", endpoint)
+	case info.Region == "":
+		return nil, trace.BadParameter("invalid OpenSearch endpoint %q, empty region", endpoint)
+	case info.Partition == "":
+		return nil, trace.BadParameter("invalid OpenSearch endpoint %q, empty partition", endpoint)
+	}
+
+	switch {
+	case info.Partition == AWSCNEndpointSuffix && IsCNRegion(info.Region):
+	case info.Partition == AWSEndpointSuffix && !IsCNRegion(info.Region):
+	default:
+		return nil, trace.BadParameter("invalid AWS region %q for AWS partition %q",
+			info.Region, info.Partition)
+	}
+	return info, nil
+}
+
+// DynamoDBURIForRegion constructs a DynamoDB URI based on the AWS region.
+// The URI uses a custom schema aws:// to differentiate an auto-generated URI from
+// a user-configured URI in the engine.
+// When the Teleport DynamoDB engine sees this custom URI schema, it will resolve
+// the real endpoint using the request API target.
+// https://docs.aws.amazon.com/general/latest/gr/ddb.html
+func DynamoDBURIForRegion(region string) string {
+	var suffix string
+	if IsCNRegion(region) {
+		suffix = AWSCNEndpointSuffix
+	} else {
+		suffix = AWSEndpointSuffix
+	}
+	return fmt.Sprintf("aws://dynamodb.%s%s", region, suffix)
+}
+
+// extractAWSEndpointParts strips the schema, port, and AWS suffix,
+// then splits the prefix by subdomain separator (".") and returns the parts and suffix.
+func extractAWSEndpointParts(endpoint string) ([]string, string, error) {
+	uri, err := removeSchemaAndPort(endpoint)
+	if err != nil {
+		return nil, "", trace.Wrap(err)
+	}
+	prefix, suffix, err := removePartitionSuffix(uri)
+	if err != nil {
+		return nil, "", trace.Wrap(err)
+	}
+	return strings.Split(prefix, "."), suffix, nil
 }

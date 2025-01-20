@@ -1,23 +1,26 @@
 /*
-Copyright 2022 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+ * Teleport
+ * Copyright (C) 2023  Gravitational, Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 package users
 
 import (
 	"context"
+	"slices"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/memorydb"
@@ -25,7 +28,7 @@ import (
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport/api/types"
-	"github.com/gravitational/teleport/api/utils"
+	"github.com/gravitational/teleport/lib/cloud"
 	libaws "github.com/gravitational/teleport/lib/cloud/aws"
 	"github.com/gravitational/teleport/lib/srv/db/common"
 	libsecrets "github.com/gravitational/teleport/lib/srv/db/secrets"
@@ -67,22 +70,26 @@ func (f *memoryDBFetcher) GetType() string {
 
 // FetchDatabaseUsers fetches users for provided database. Implements Fetcher.
 func (f *memoryDBFetcher) FetchDatabaseUsers(ctx context.Context, database types.Database) ([]User, error) {
-	if database.GetAWS().MemoryDB.ACLName == "" {
+	meta := database.GetAWS()
+	if meta.MemoryDB.ACLName == "" {
 		return nil, nil
 	}
 
-	client, err := f.cfg.Clients.GetAWSMemoryDBClient(database.GetAWS().Region)
+	client, err := f.cfg.Clients.GetAWSMemoryDBClient(ctx, meta.Region,
+		cloud.WithAssumeRoleFromAWSMeta(meta),
+		cloud.WithAmbientCredentials(),
+	)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	secrets, err := newSecretStore(database, f.cfg.Clients)
+	secrets, err := newSecretStore(ctx, database, f.cfg.Clients, f.cfg.ClusterName)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
 	users := []User{}
-	mdbUsers, err := f.getManagedUsersForACL(ctx, database.GetAWS().Region, database.GetAWS().MemoryDB.ACLName, client)
+	mdbUsers, err := f.getManagedUsersForACL(ctx, meta.Region, meta.MemoryDB.ACLName, client)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -108,7 +115,7 @@ func (f *memoryDBFetcher) getManagedUsersForACL(ctx context.Context, region, acl
 	managedUsers := []*memorydb.User{}
 	for _, user := range allUsers {
 		// Match ACL.
-		if !utils.SliceContainsStr(aws.StringValueSlice(user.ACLNames), aclName) {
+		if !slices.Contains(aws.StringValueSlice(user.ACLNames), aclName) {
 			continue
 		}
 
@@ -117,9 +124,9 @@ func (f *memoryDBFetcher) getManagedUsersForACL(ctx context.Context, region, acl
 		userTags, err := f.getUserTags(ctx, user, client)
 		if err != nil {
 			if trace.IsAccessDenied(err) {
-				f.cfg.Log.WithError(err).Debugf("No Permission to get tags for user %v", aws.StringValue(user.ARN))
+				f.cfg.Log.DebugContext(ctx, "No Permission to get tags.", "user", aws.StringValue(user.ARN), "error", err)
 			} else {
-				f.cfg.Log.WithError(err).Warnf("Failed to get tags for user %v", aws.StringValue(user.ARN))
+				f.cfg.Log.WarnContext(ctx, "Failed to get tags.", "user", aws.StringValue(user.ARN), "error", err)
 			}
 			continue
 		}

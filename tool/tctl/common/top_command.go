@@ -1,18 +1,20 @@
 /*
-Copyright 2019 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+ * Teleport
+ * Copyright (C) 2023  Gravitational, Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 package common
 
@@ -26,26 +28,28 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/dustin/go-humanize"
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
-	"github.com/gravitational/kingpin"
 	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/trace"
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/types"
-	"github.com/gravitational/teleport/lib/auth"
-	"github.com/gravitational/teleport/lib/service"
+	"github.com/gravitational/teleport/lib/service/servicecfg"
 	"github.com/gravitational/teleport/lib/utils"
+	commonclient "github.com/gravitational/teleport/tool/tctl/common/client"
+	tctlcfg "github.com/gravitational/teleport/tool/tctl/common/config"
 )
 
 // TopCommand implements `tctl top` group of commands.
 type TopCommand struct {
-	config *service.Config
+	config *servicecfg.Config
 
 	// CLI clauses (subcommands)
 	top           *kingpin.CmdClause
@@ -54,15 +58,15 @@ type TopCommand struct {
 }
 
 // Initialize allows TopCommand to plug itself into the CLI parser.
-func (c *TopCommand) Initialize(app *kingpin.Application, config *service.Config) {
+func (c *TopCommand) Initialize(app *kingpin.Application, _ *tctlcfg.GlobalCLIFlags, config *servicecfg.Config) {
 	c.config = config
-	c.top = app.Command("top", "Report diagnostic information")
+	c.top = app.Command("top", "Report diagnostic information.")
 	c.diagURL = c.top.Arg("diag-addr", "Diagnostic HTTP URL").Default("http://127.0.0.1:3000").String()
 	c.refreshPeriod = c.top.Arg("refresh", "Refresh period").Default("5s").Duration()
 }
 
 // TryRun takes the CLI command as an argument (like "nodes ls") and executes it.
-func (c *TopCommand) TryRun(ctx context.Context, cmd string, client auth.ClientI) (match bool, err error) {
+func (c *TopCommand) TryRun(ctx context.Context, cmd string, _ commonclient.InitFunc) (match bool, err error) {
 	switch cmd {
 	case c.top.FullCommand():
 		diagClient, err := roundtrip.NewClient(*c.diagURL, "")
@@ -207,6 +211,7 @@ func (c *TopCommand) render(ctx context.Context, re Report, eventID string) erro
 		{"Cert Gen Requests/sec", humanize.FormatFloat("", re.Cluster.GenerateRequestsCount.GetFreq())},
 		{"Cert Gen Throttled Requests/sec", humanize.FormatFloat("", re.Cluster.GenerateRequestsThrottledCount.GetFreq())},
 		{"Auth Watcher Queue Size", humanize.FormatFloat("", re.Cache.QueueSize)},
+		{"Active Migrations", strings.Join(re.Cluster.ActiveMigrations, ", ")},
 	}
 	for _, rc := range re.Cluster.RemoteClusters {
 		t1.Rows = append(t1.Rows, []string{
@@ -289,7 +294,7 @@ func (c *TopCommand) render(ctx context.Context, re Report, eventID string) erro
 					ui.NewRow(0.3, t3),
 				),
 				ui.NewCol(0.5,
-					ui.NewRow(0.3, percentileTable("Generate Server Certificates Histogram", re.Cluster.GenerateRequestsHistogram)),
+					ui.NewRow(0.3, percentileTable("Generate Server Certificates Percentiles", re.Cluster.GenerateRequestsHistogram)),
 				),
 			),
 			ui.NewRow(0.025,
@@ -534,6 +539,8 @@ type ClusterStats struct {
 	GenerateRequestsThrottledCount Counter
 	// GenerateRequestsHistogram is a histogram of generate requests latencies
 	GenerateRequestsHistogram Histogram
+	// ActiveMigrations is a set of active migrations
+	ActiveMigrations []string
 }
 
 // RemoteCluster is a remote cluster (or local cluster)
@@ -734,6 +741,7 @@ func generateReport(metrics map[string]*dto.MetricFamily, prev *Report, period t
 		GenerateRequestsCount:          Counter{Count: getCounterValue(metrics[teleport.MetricGenerateRequests])},
 		GenerateRequestsThrottledCount: Counter{Count: getCounterValue(metrics[teleport.MetricGenerateRequestsThrottled])},
 		GenerateRequestsHistogram:      getHistogram(metrics[teleport.MetricGenerateRequestsHistogram], atIndex(0)),
+		ActiveMigrations:               getActiveMigrations(metrics[prometheus.BuildFQName(teleport.MetricNamespace, "", teleport.MetricMigrations)]),
 	}
 
 	if prev != nil {
@@ -875,6 +883,25 @@ func getRemoteClusters(metric *dto.MetricFamily) []RemoteCluster {
 			}
 		}
 		out[i] = rc
+	}
+	return out
+}
+
+func getActiveMigrations(metric *dto.MetricFamily) []string {
+	if metric == nil || metric.GetType() != dto.MetricType_GAUGE || len(metric.Metric) == 0 {
+		return nil
+	}
+	var out []string
+	for _, counter := range metric.Metric {
+		if counter.Gauge.GetValue() == 0 {
+			continue
+		}
+		for _, label := range counter.Label {
+			if label.GetName() == teleport.TagMigration {
+				out = append(out, label.GetValue())
+				break
+			}
+		}
 	}
 	return out
 }

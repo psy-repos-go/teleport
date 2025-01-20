@@ -1,21 +1,20 @@
 /*
-
- Copyright 2022 Gravitational, Inc.
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-
-
-*/
+ * Teleport
+ * Copyright (C) 2023  Gravitational, Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 package db
 
@@ -32,6 +31,10 @@ import (
 	"strconv"
 	"testing"
 
+	// Register Snowflake database driver.
+	// Do not move this dependency outside _test.go file. Doing so will create
+	// ocsp_response_cache.json in random places.
+	_ "github.com/snowflakedb/gosnowflake"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gravitational/teleport/api/types"
@@ -42,7 +45,7 @@ import (
 	"github.com/gravitational/teleport/lib/srv/db/snowflake"
 )
 
-func init() {
+func registerTestSnowflakeEngine() {
 	// Override Snowflake engine that is used normally with the test one
 	// with custom HTTP client.
 	common.RegisterEngine(newTestSnowflakeEngine, defaults.ProtocolSnowflake)
@@ -108,14 +111,13 @@ func TestAccessSnowflake(t *testing.T) {
 			err:          "HTTP: 401",
 		},
 		{
-			desc:         "no access to databases",
+			desc:         "database name access is not enforced",
 			user:         "alice",
 			role:         "admin",
 			allowDbNames: []string{},
 			allowDbUsers: []string{types.Wildcard},
 			dbName:       "snowflake",
 			dbUser:       "snowflake",
-			err:          "HTTP: 401",
 		},
 		{
 			desc:         "no access to users",
@@ -240,7 +242,7 @@ func TestAuditSnowflake(t *testing.T) {
 	})
 
 	t.Run("session ends event", func(t *testing.T) {
-		t.Skip() //TODO(jakule): Driver for some reason doesn't terminate the session.
+		t.Skip() // TODO(jakule): Driver for some reason doesn't terminate the session.
 		// Closing connection should trigger session end event.
 		err := dbConn.Close()
 		require.NoError(t, err)
@@ -346,11 +348,11 @@ func TestTokenSession(t *testing.T) {
 	err = json.Unmarshal(respBody, &jsonMap)
 	require.NoError(t, err)
 
-	require.Equal(t, jsonMap.Data.Rowset[0][0], "42")
+	require.Equal(t, "42", jsonMap.Data.Rowset[0][0])
 }
 
 func withSnowflake(name string, opts ...snowflake.TestServerOption) withDatabaseOption {
-	return func(t *testing.T, ctx context.Context, testCtx *testContext) types.Database {
+	return func(t testing.TB, ctx context.Context, testCtx *testContext) types.Database {
 		snowflakeServer, err := snowflake.NewTestServer(common.TestServerConfig{
 			Name:       name,
 			AuthClient: testCtx.authClient,

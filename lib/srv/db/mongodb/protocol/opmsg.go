@@ -1,18 +1,20 @@
 /*
-Copyright 2021 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+ * Teleport
+ * Copyright (C) 2023  Gravitational, Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 package protocol
 
@@ -255,7 +257,7 @@ func readOpMsg(header MessageHeader, payload []byte) (*MessageOpMsg, error) {
 				return nil, trace.BadParameter("malformed OP_MSG: %v %v", err, payload)
 			}
 
-			id, docs, rem, ok = ReadMsgSectionDocumentSequence(rem)
+			id, docs, rem, ok = wiremessage.ReadMsgSectionDocumentSequence(rem)
 			if !ok {
 				return nil, trace.BadParameter("malformed OP_MSG: missing document sequence section %v", payload)
 			}
@@ -287,9 +289,8 @@ func validateDocumentSize(src []byte) error {
 
 	// document length is encoded in the first 4 bytes
 	documentLength := int(int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16 | int32(src[3])<<24)
-
-	// document payload cannot be shorter than the size of the whole message plus the header length.
-	if documentLength+headerLen <= len(src) {
+	// Ensure that idx is not negative.
+	if documentLength-4 < 0 {
 		return trace.BadParameter("invalid document length")
 	}
 	return nil
@@ -310,41 +311,4 @@ func (m *MessageOpMsg) ToWire(responseTo int32) (dst []byte) {
 		dst = bsoncore.AppendInt32(dst, int32(m.Checksum))
 	}
 	return bsoncore.UpdateLength(dst, idx, int32(len(dst[idx:])))
-}
-
-// ReadMsgSectionDocumentSequence reads multiple documents from the source.
-//
-// This function works in the same way as wiremessage.ReadMsgSectionDocumentSequence except that it
-// validate the rem index before reading the document.
-func ReadMsgSectionDocumentSequence(src []byte) (identifier string, docs []bsoncore.Document, rem []byte, ok bool) {
-	length, rem, ok := readi32(src)
-	if !ok || int(length) > len(src) {
-		return "", nil, rem, false
-	}
-	// Ensure that idx is not negative.
-	if length-4 < 0 {
-		return "", nil, rem, false
-	}
-
-	rem, ret := rem[:length-4], rem[length-4:] // reslice so we can just iterate a loop later
-
-	identifier, rem, ok = readcstring(rem)
-	if !ok {
-		return "", nil, rem, false
-	}
-
-	docs = make([]bsoncore.Document, 0)
-	var doc bsoncore.Document
-	for {
-		doc, rem, ok = bsoncore.ReadDocument(rem)
-		if !ok {
-			break
-		}
-		docs = append(docs, doc)
-	}
-	if len(rem) > 0 {
-		return "", nil, append(rem, ret...), false
-	}
-
-	return identifier, docs, ret, true
 }

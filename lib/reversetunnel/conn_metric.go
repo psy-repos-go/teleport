@@ -1,18 +1,21 @@
 /*
-Copyright 2022 Gravitational, Inc.
+ * Teleport
+ * Copyright (C) 2023  Gravitational, Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
 package reversetunnel
 
 import (
@@ -27,16 +30,16 @@ import (
 type dialType string
 
 const (
-	// direct is a direct dialed connection.
-	direct dialType = "direct"
-	// peer is a connection established through a peer proxy.
-	peer dialType = "peer"
-	// tunnel is a connection established over a local reverse tunnel initiated
+	// dialTypeDirect is a direct dialed connection.
+	dialTypeDirect dialType = "direct"
+	// dialTypePeer is a connection established through a peer proxy.
+	dialTypePeer dialType = "peer"
+	// dialTypeTunnel is a connection established over a local reverse tunnel initiated
 	// by a client.
-	tunnel dialType = "tunnel"
-	// peerTunnel is a connection established over a local reverse tunnel
+	dialTypeTunnel dialType = "tunnel"
+	// dialTypePeerTunnel is a connection established over a local reverse tunnel
 	// initiated by a peer proxy.
-	peerTunnel dialType = "peer-tunnel"
+	dialTypePeerTunnel dialType = "peer-tunnel"
 )
 
 // metricConn reports metrics for reversetunnel connections.
